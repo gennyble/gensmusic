@@ -3,12 +3,7 @@ use std::{
 	ffi::OsStr,
 	fs::File,
 	path::PathBuf,
-	sync::{
-		atomic::{AtomicBool, Ordering},
-		mpsc::{sync_channel, Receiver, SyncSender, TryRecvError},
-		Arc,
-	},
-	thread::JoinHandle,
+	sync::mpsc::{sync_channel, Receiver, TryRecvError},
 	time::Duration,
 };
 
@@ -16,11 +11,13 @@ use eframe::{egui, NativeOptions};
 use egui_extras::{Column, TableBuilder};
 use raplay::{
 	source::{Source, Symph},
-	CallbackInfo, Sink, Timestamp,
+	Timestamp,
 };
 use sounder::Sounder;
+use timekeeper::Timekeeper;
 
 mod sounder;
+mod timekeeper;
 
 fn main() {
 	let nopt = NativeOptions::default();
@@ -37,7 +34,8 @@ pub enum GenMsg {
 	/// When raplay pauses it will send an event when the buffer is empty
 	/// so we can stop the loop that feeds data (i think?).
 	FinishPause,
-	TimestampWakeup,
+	/// Sent by the [Timekeeper] to wake us up and update the elapsed time
+	Timetick,
 }
 
 #[derive(Debug, PartialEq)]
@@ -81,17 +79,12 @@ struct GensMusic {
 	files: Vec<PathBuf>,
 
 	/// Communication from other threads
-	tx: SyncSender<GenMsg>,
 	rx: Receiver<GenMsg>,
-
-	// === Graphical ==
-	ctx: egui::Context,
 
 	/// Sound output and control via raplay
 	sounder: Sounder,
+	timekeeper: Timekeeper,
 	state: GenState,
-	timekeeper: Option<JoinHandle<()>>,
-	timekeeper_cancel: Arc<AtomicBool>,
 
 	queue: VecDeque<PathBuf>,
 	current: Option<Current>,
@@ -119,13 +112,10 @@ impl GensMusic {
 
 		Self {
 			files: mp3_files,
-			tx,
 			rx,
-			ctx: cc.egui_ctx.clone(),
 			sounder,
 			state: GenState::Stopped,
-			timekeeper: None,
-			timekeeper_cancel: Arc::new(AtomicBool::new(false)),
+			timekeeper: Timekeeper::new(cc.egui_ctx.clone(), tx),
 			current: None,
 			queue: VecDeque::new(),
 		}
@@ -145,7 +135,7 @@ impl GensMusic {
 				Ok(GenMsg::FinishPause) => {
 					self.sounder.finish_pause();
 				}
-				Ok(GenMsg::TimestampWakeup) => {
+				Ok(GenMsg::Timetick) => {
 					if let Some(stamp) = self.sounder.timestamp() {
 						if let Some(cur) = self.current.as_mut() {
 							cur.timestamp = stamp;
@@ -156,33 +146,6 @@ impl GensMusic {
 				Err(TryRecvError::Empty) => break,
 			}
 		}
-	}
-
-	fn start_timekeeper(&mut self) {
-		if self.timekeeper.is_none() {
-			let cancel = self.timekeeper_cancel.clone();
-			let tx = self.tx.clone();
-			let ctx = self.ctx.clone();
-
-			let hwnd = std::thread::spawn(move || loop {
-				std::thread::sleep(Duration::from_millis(250));
-
-				if cancel.load(Ordering::Relaxed) {
-					break;
-				}
-
-				tx.send(GenMsg::TimestampWakeup).unwrap();
-				ctx.request_repaint();
-			});
-
-			self.timekeeper = Some(hwnd);
-		}
-	}
-
-	fn stop_timekeeper(&mut self) {
-		self.timekeeper_cancel.store(true, Ordering::Release);
-		// we drop it here and let it wakeup and die later
-		let _ = self.timekeeper.take();
 	}
 
 	/// Call this when you are starting a new queue or the current media soruce has ended
@@ -210,7 +173,7 @@ impl GensMusic {
 			self.state = GenState::Paused;
 		}
 		self.sounder.pause();
-		self.stop_timekeeper();
+		self.timekeeper.stop();
 	}
 
 	fn unpause(&mut self) {
@@ -218,12 +181,12 @@ impl GensMusic {
 			self.state = GenState::Playing;
 		}
 		self.sounder.play();
-		self.start_timekeeper();
+		self.timekeeper.start(Duration::from_millis(100));
 	}
 }
 
 impl eframe::App for GensMusic {
-	fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+	fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
 		self.handle_events();
 
 		egui::TopBottomPanel::bottom("controls")

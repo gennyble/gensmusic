@@ -1,21 +1,12 @@
-use std::{sync::mpsc::SyncSender, time::Duration};
+use std::sync::mpsc::SyncSender;
 
 use eframe::egui::Context;
 use raplay::{source::Symph, CallbackInfo, Sink, Timestamp};
 
 use crate::GenMsg;
 
-enum SounderState {
-	Stopped,
-	Paused,
-	Playing,
-}
-
 pub struct Sounder {
-	/// egui context. For waking up the GUI thread
-	ctx: Context,
 	sink: Sink,
-	state: SounderState,
 }
 
 impl Sounder {
@@ -32,11 +23,7 @@ impl Sounder {
 		sink.on_err_callback(Some(move |err| sink_cb_err(err, &cb_err_tx)))
 			.unwrap();
 
-		Self {
-			ctx,
-			sink,
-			state: SounderState::Stopped,
-		}
+		Self { sink }
 	}
 
 	/// Load an audio source preparing it for playback.
@@ -77,4 +64,4 @@ fn sink_cb(cbi: CallbackInfo, tx: &SyncSender<GenMsg>, ctx: &Context) {
 	ctx.request_repaint();
 }
 
-fn sink_cb_err(_err: raplay::Error, tx: &SyncSender<GenMsg>) {}
+fn sink_cb_err(_err: raplay::Error, _tx: &SyncSender<GenMsg>) {}
