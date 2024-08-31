@@ -1,4 +1,5 @@
 use std::{
+	collections::VecDeque,
 	ffi::OsStr,
 	fs::File,
 	path::PathBuf,
@@ -13,7 +14,13 @@ use std::{
 
 use eframe::{egui, NativeOptions};
 use egui_extras::{Column, TableBuilder};
-use raplay::{source::Symph, CallbackInfo, Sink, Timestamp};
+use raplay::{
+	source::{Source, Symph},
+	CallbackInfo, Sink, Timestamp,
+};
+use sounder::Sounder;
+
+mod sounder;
 
 fn main() {
 	let nopt = NativeOptions::default();
@@ -35,9 +42,39 @@ pub enum GenMsg {
 
 #[derive(Debug, PartialEq)]
 pub enum GenState {
+	/// We'll probably only ever be in this state on first boot.
 	Stopped,
+	/// There is no media playing
 	Paused,
+	/// There is media playing
 	Playing,
+}
+
+pub struct Current {
+	path: PathBuf,
+	timestamp: Timestamp,
+}
+
+impl Current {
+	pub fn new<P: Into<PathBuf>>(path: P) -> Self {
+		Self {
+			path: path.into(),
+			timestamp: Timestamp {
+				current: Duration::ZERO,
+				total: Duration::ZERO,
+			},
+		}
+	}
+
+	pub fn new_with_duration<P: Into<PathBuf>>(path: P, duration: Duration) -> Self {
+		Self {
+			path: path.into(),
+			timestamp: Timestamp {
+				current: Duration::ZERO,
+				total: duration,
+			},
+		}
+	}
 }
 
 struct GensMusic {
@@ -51,11 +88,13 @@ struct GensMusic {
 	ctx: egui::Context,
 
 	/// Sound output and control via raplay
-	sink: Sink,
+	sounder: Sounder,
 	state: GenState,
-	next: Option<PathBuf>,
 	timekeeper: Option<JoinHandle<()>>,
 	timekeeper_cancel: Arc<AtomicBool>,
+
+	queue: VecDeque<PathBuf>,
+	current: Option<Current>,
 }
 
 impl GensMusic {
@@ -76,51 +115,43 @@ impl GensMusic {
 		// Channel for communicating back to the GUI thread
 		let (tx, rx) = sync_channel::<GenMsg>(8); //gen- idk why 8
 
-		// Make me a sink, baby
-		let sink = Sink::default();
-
-		let cb_tx = tx.clone();
-		let cb_ctx = cc.egui_ctx.clone();
-		sink.on_callback(Some(move |cbi| sink_cb(cbi, &cb_tx, &cb_ctx)))
-			.unwrap();
-
-		let cb_err_tx = tx.clone();
-		sink.on_err_callback(Some(move |err| sink_cb_err(err, &cb_err_tx)))
-			.unwrap();
+		let sounder = Sounder::new(cc.egui_ctx.clone(), tx.clone());
 
 		Self {
 			files: mp3_files,
 			tx,
 			rx,
 			ctx: cc.egui_ctx.clone(),
-			sink,
+			sounder,
 			state: GenState::Stopped,
-			next: None,
 			timekeeper: None,
 			timekeeper_cancel: Arc::new(AtomicBool::new(false)),
+			current: None,
+			queue: VecDeque::new(),
 		}
 	}
 
 	fn is_playing(&self) -> bool {
-		//SAFTEY: if we lost the mutex it's so joever
-		let sink_playing = self.sink.is_playing().unwrap();
-		let state_playing = GenState::Playing == self.state;
-
-		if sink_playing != state_playing {
-			eprintln!("[WARN] sink state and genstate desynced");
-		}
-
-		state_playing
+		self.state == GenState::Playing
 	}
 
 	fn handle_events(&mut self) {
 		loop {
 			match self.rx.try_recv() {
-				Ok(GenMsg::MediaEnded) => todo!(),
-				Ok(GenMsg::FinishPause) => {
-					self.sink.hard_pause().unwrap();
+				Ok(GenMsg::MediaEnded) => {
+					self.advance_queue();
+					self.unpause();
 				}
-				Ok(GenMsg::TimestampWakeup) => (),
+				Ok(GenMsg::FinishPause) => {
+					self.sounder.finish_pause();
+				}
+				Ok(GenMsg::TimestampWakeup) => {
+					if let Some(stamp) = self.sounder.timestamp() {
+						if let Some(cur) = self.current.as_mut() {
+							cur.timestamp = stamp;
+						}
+					}
+				}
 				Err(TryRecvError::Disconnected) => panic!(),
 				Err(TryRecvError::Empty) => break,
 			}
@@ -154,38 +185,40 @@ impl GensMusic {
 		let _ = self.timekeeper.take();
 	}
 
-	fn change_media<P: Into<PathBuf>>(&mut self, path: P) {
-		if self.is_playing() {
-			self.sink.pause().unwrap();
-		}
-		self.state = GenState::Stopped;
+	/// Call this when you are starting a new queue or the current media soruce has ended
+	fn advance_queue(&mut self) {
+		let next = self.queue.pop_front();
 
-		self.next = Some(path.into());
+		match next {
+			Some(path) => {
+				let file = File::open(&path).unwrap();
+				let symph = Symph::try_new(file, &Default::default()).unwrap();
+				let timestamp = symph.get_time().unwrap();
+
+				self.sounder.load(symph);
+				self.current = Some(Current { path, timestamp });
+			}
+			None => {
+				self.sounder.pause();
+				self.current = None;
+			}
+		}
 	}
 
 	fn pause(&mut self) {
 		if self.state == GenState::Playing {
 			self.state = GenState::Paused;
 		}
-		self.sink.pause().unwrap();
+		self.sounder.pause();
+		self.stop_timekeeper();
 	}
 
 	fn unpause(&mut self) {
 		if self.state == GenState::Paused {
 			self.state = GenState::Playing;
 		}
-		self.sink.resume().unwrap();
-	}
-
-	fn start_playing(&mut self) {
-		if let Some(path) = self.next.as_deref() {
-			let file = File::open(path).unwrap();
-			let symph = Symph::try_new(file, &Default::default()).unwrap();
-
-			self.state = GenState::Playing;
-			self.sink.load(symph, true).unwrap();
-			self.start_timekeeper();
-		}
+		self.sounder.play();
+		self.start_timekeeper();
 	}
 }
 
@@ -205,27 +238,22 @@ impl eframe::App for GensMusic {
 						match self.state {
 							GenState::Paused => self.unpause(),
 							GenState::Playing => panic!(),
-							GenState::Stopped => self.start_playing(),
+							GenState::Stopped => self.unpause(),
 						}
 					}
 				}
 
-				if let Some(path) = self.next.as_deref() {
+				if let Some(current) = self.current.as_ref() {
 					ui.horizontal(|ui| {
-						if self.is_playing() {
-							let timestamp = self.sink.get_timestamp().unwrap();
-							ui.label(format!(
-								"{}/{}",
-								timestamp.current.as_secs(),
-								timestamp.total.as_secs()
-							));
-						} else {
-							ui.label("0 / 0");
-						}
+						ui.label(format!(
+							"{} / {}",
+							current.timestamp.current.as_secs(),
+							current.timestamp.total.as_secs()
+						));
 
 						ui.separator();
 
-						ui.label(path.to_string_lossy());
+						ui.label(current.path.to_string_lossy());
 					});
 				}
 			});
@@ -240,29 +268,25 @@ impl eframe::App for GensMusic {
 					});
 				})
 				.body(|mut body| {
-					// So clearly a clone here is unoptimal, but.
-					for file in self.files.clone() {
+					let mut should_advance = false;
+
+					for (idx, file) in self.files.iter().enumerate() {
 						body.row(20.0, |mut row| {
 							row.col(|ui| {
 								if ui.label(file.to_string_lossy()).clicked() {
-									self.change_media(file);
+									self.queue.clear();
+									self.queue
+										.extend(self.files[idx..].iter().map(<_>::to_owned));
+									should_advance = true;
 								}
 							});
 						});
+					}
+
+					if should_advance {
+						self.advance_queue();
 					}
 				});
 		});
 	}
 }
-
-fn sink_cb(cbi: CallbackInfo, tx: &SyncSender<GenMsg>, ctx: &egui::Context) {
-	match cbi {
-		CallbackInfo::SourceEnded => tx.send(GenMsg::MediaEnded).unwrap(),
-		CallbackInfo::PauseEnds(_) => tx.send(GenMsg::FinishPause).unwrap(),
-		_ => todo!(),
-	}
-
-	ctx.request_repaint();
-}
-
-fn sink_cb_err(_err: raplay::Error, tx: &SyncSender<GenMsg>) {}
