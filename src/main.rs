@@ -7,7 +7,10 @@ use std::{
 	time::Duration,
 };
 
-use eframe::{egui, NativeOptions};
+use eframe::{
+	egui::{self, ViewportBuilder},
+	NativeOptions,
+};
 use egui_extras::{Column, TableBuilder};
 use raplay::{
 	source::{Source, Symph},
@@ -20,9 +23,13 @@ mod sounder;
 mod timekeeper;
 
 fn main() {
-	let nopt = NativeOptions::default();
+	let nopt = NativeOptions {
+		viewport: ViewportBuilder::default().with_inner_size([640.0, 480.0]),
+		..Default::default()
+	};
+
 	eframe::run_native(
-		"egui app",
+		"gensmusic",
 		nopt,
 		Box::new(|cc| Ok(Box::new(GensMusic::new(cc)))),
 	)
