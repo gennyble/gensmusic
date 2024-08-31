@@ -5,4 +5,5 @@ edition = "2021"
 
 [dependencies]
 eframe = "0.28.1"
+egui_extras = "0.28.1"
 raplay = { path = "../raplay", version = "0.3.5" }
