@@ -29,6 +29,12 @@ impl Sounder {
 	/// Load an audio source preparing it for playback.
 	pub fn load(&mut self, symph: Symph) {
 		self.sink.load(symph, false).unwrap();
+		let info = self.sink.get_info();
+
+		println!(
+			"{}hz // {} // {}ch",
+			info.sample_rate, info.sample_format, info.channel_count
+		);
 	}
 
 	pub fn timestamp(&self) -> Option<Timestamp> {

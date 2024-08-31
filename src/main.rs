@@ -94,7 +94,7 @@ impl GensMusic {
 	pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
 		// Gather all MP3 files in the current diretory
 		let mut mp3_files = vec![];
-		for entry in std::fs::read_dir(".").unwrap() {
+		for entry in std::fs::read_dir("/Users/gen/escape room").unwrap() {
 			let entry = entry.unwrap();
 
 			match entry.path().extension() {
@@ -104,6 +104,7 @@ impl GensMusic {
 				_ => (),
 			}
 		}
+		mp3_files.sort();
 
 		// Channel for communicating back to the GUI thread
 		let (tx, rx) = sync_channel::<GenMsg>(8); //gen- idk why 8
@@ -169,17 +170,15 @@ impl GensMusic {
 	}
 
 	fn pause(&mut self) {
-		if self.state == GenState::Playing {
-			self.state = GenState::Paused;
-		}
+		self.state = GenState::Paused;
+
 		self.sounder.pause();
 		self.timekeeper.stop();
 	}
 
 	fn unpause(&mut self) {
-		if self.state == GenState::Paused {
-			self.state = GenState::Playing;
-		}
+		self.state = GenState::Playing;
+
 		self.sounder.play();
 		self.timekeeper.start(Duration::from_millis(100));
 	}
