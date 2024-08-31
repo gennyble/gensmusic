@@ -27,7 +27,17 @@ fn main() {
 
 pub enum GenMsg {
 	MediaEnded,
+	/// When raplay pauses it will send an event when the buffer is empty
+	/// so we can stop the loop that feeds data (i think?).
+	FinishPause,
 	TimestampWakeup,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum GenState {
+	Stopped,
+	Paused,
+	Playing,
 }
 
 struct GensMusic {
@@ -42,6 +52,7 @@ struct GensMusic {
 
 	/// Sound output and control via raplay
 	sink: Sink,
+	state: GenState,
 	next: Option<PathBuf>,
 	timekeeper: Option<JoinHandle<()>>,
 	timekeeper_cancel: Arc<AtomicBool>,
@@ -83,6 +94,7 @@ impl GensMusic {
 			rx,
 			ctx: cc.egui_ctx.clone(),
 			sink,
+			state: GenState::Stopped,
 			next: None,
 			timekeeper: None,
 			timekeeper_cancel: Arc::new(AtomicBool::new(false)),
@@ -91,13 +103,23 @@ impl GensMusic {
 
 	fn is_playing(&self) -> bool {
 		//SAFTEY: if we lost the mutex it's so joever
-		self.sink.is_playing().unwrap()
+		let sink_playing = self.sink.is_playing().unwrap();
+		let state_playing = GenState::Playing == self.state;
+
+		if sink_playing != state_playing {
+			eprintln!("[WARN] sink state and genstate desynced");
+		}
+
+		state_playing
 	}
 
 	fn handle_events(&mut self) {
 		loop {
 			match self.rx.try_recv() {
 				Ok(GenMsg::MediaEnded) => todo!(),
+				Ok(GenMsg::FinishPause) => {
+					self.sink.hard_pause().unwrap();
+				}
 				Ok(GenMsg::TimestampWakeup) => (),
 				Err(TryRecvError::Disconnected) => panic!(),
 				Err(TryRecvError::Empty) => break,
@@ -136,8 +158,23 @@ impl GensMusic {
 		if self.is_playing() {
 			self.sink.pause().unwrap();
 		}
+		self.state = GenState::Stopped;
 
 		self.next = Some(path.into());
+	}
+
+	fn pause(&mut self) {
+		if self.state == GenState::Playing {
+			self.state = GenState::Paused;
+		}
+		self.sink.pause().unwrap();
+	}
+
+	fn unpause(&mut self) {
+		if self.state == GenState::Paused {
+			self.state = GenState::Playing;
+		}
+		self.sink.resume().unwrap();
 	}
 
 	fn start_playing(&mut self) {
@@ -145,6 +182,7 @@ impl GensMusic {
 			let file = File::open(path).unwrap();
 			let symph = Symph::try_new(file, &Default::default()).unwrap();
 
+			self.state = GenState::Playing;
 			self.sink.load(symph, true).unwrap();
 			self.start_timekeeper();
 		}
@@ -159,10 +197,16 @@ impl eframe::App for GensMusic {
 			.frame(egui::Frame::default().inner_margin(8.0))
 			.show(ctx, |ui| {
 				if self.is_playing() {
-					if ui.button("Pause").clicked() {}
+					if ui.button("Pause").clicked() {
+						self.pause();
+					}
 				} else {
 					if ui.button("Play").clicked() {
-						self.start_playing();
+						match self.state {
+							GenState::Paused => self.unpause(),
+							GenState::Playing => panic!(),
+							GenState::Stopped => self.start_playing(),
+						}
 					}
 				}
 
@@ -214,7 +258,7 @@ impl eframe::App for GensMusic {
 fn sink_cb(cbi: CallbackInfo, tx: &SyncSender<GenMsg>, ctx: &egui::Context) {
 	match cbi {
 		CallbackInfo::SourceEnded => tx.send(GenMsg::MediaEnded).unwrap(),
-		CallbackInfo::PauseEnds(_) => todo!(),
+		CallbackInfo::PauseEnds(_) => tx.send(GenMsg::FinishPause).unwrap(),
 		_ => todo!(),
 	}
 
