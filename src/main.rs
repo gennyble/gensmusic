@@ -92,6 +92,8 @@ struct GensMusic {
 	sounder: Sounder,
 	timekeeper: Timekeeper,
 	state: GenState,
+	/// Volume is in the range 0 - 100
+	volume: u8,
 
 	queue: VecDeque<PathBuf>,
 	current: Option<Current>,
@@ -121,8 +123,11 @@ impl GensMusic {
 		Self {
 			files: mp3_files,
 			rx,
+
 			sounder,
 			state: GenState::Stopped,
+			volume: 100,
+
 			timekeeper: Timekeeper::new(cc.egui_ctx.clone(), tx),
 			current: None,
 			queue: VecDeque::new(),
@@ -198,19 +203,28 @@ impl eframe::App for GensMusic {
 		egui::TopBottomPanel::bottom("controls")
 			.frame(egui::Frame::default().inner_margin(8.0))
 			.show(ctx, |ui| {
-				if self.is_playing() {
-					if ui.button("Pause").clicked() {
-						self.pause();
-					}
-				} else {
-					if ui.button("Play").clicked() {
-						match self.state {
-							GenState::Paused => self.unpause(),
-							GenState::Playing => panic!(),
-							GenState::Stopped => self.unpause(),
+				ui.horizontal(|ui| {
+					if self.is_playing() {
+						if ui.button("Pause").clicked() {
+							self.pause();
+						}
+					} else {
+						if ui.button("Play").clicked() {
+							match self.state {
+								GenState::Paused => self.unpause(),
+								GenState::Playing => panic!(),
+								GenState::Stopped => self.unpause(),
+							}
 						}
 					}
-				}
+
+					ui.label("volume");
+					let vol_slider = ui.add(egui::Slider::new(&mut self.volume, 0..=100));
+
+					if vol_slider.changed() {
+						self.sounder.set_volume(self.volume);
+					}
+				});
 
 				if let Some(current) = self.current.as_ref() {
 					ui.horizontal(|ui| {

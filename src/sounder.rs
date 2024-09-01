@@ -58,6 +58,12 @@ impl Sounder {
 	pub fn finish_pause(&self) {
 		self.sink.hard_pause().unwrap();
 	}
+
+	/// Sets the audio output volume. Value should be in the range 0-100.
+	/// Values outside of this range (higher than 100) will be capped to 100.
+	pub fn set_volume(&mut self, vol: u8) {
+		self.sink.volume(vol.min(100) as f32 / 100.0).unwrap();
+	}
 }
 
 fn sink_cb(cbi: CallbackInfo, tx: &SyncSender<GenMsg>, ctx: &Context) {
