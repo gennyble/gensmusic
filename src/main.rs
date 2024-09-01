@@ -228,10 +228,14 @@ impl eframe::App for GensMusic {
 
 				if let Some(current) = self.current.as_ref() {
 					ui.horizontal(|ui| {
+						let cur = current.timestamp.current.as_secs();
+						let tot = current.timestamp.total.as_secs();
+
+						#[rustfmt::skip]
 						ui.label(format!(
-							"{} / {}",
-							current.timestamp.current.as_secs(),
-							current.timestamp.total.as_secs()
+							"{}:{:02} / {}:{:02}",
+							cur / 60, cur % 60,
+							tot / 60, tot % 60
 						));
 
 						ui.separator();
