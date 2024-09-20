@@ -7,11 +7,13 @@ use std::{
 	time::Duration,
 };
 
+use audiotags::Tag;
 use eframe::{
 	egui::{self, ViewportBuilder},
 	NativeOptions,
 };
 use egui_extras::{Column, TableBuilder};
+use library::{Id, Library, Song};
 use raplay::{
 	source::{Source, Symph},
 	Timestamp,
@@ -19,8 +21,10 @@ use raplay::{
 use sounder::Sounder;
 use timekeeper::Timekeeper;
 
+mod library;
 mod sounder;
 mod timekeeper;
+mod ui;
 
 fn main() {
 	let nopt = NativeOptions {
@@ -56,14 +60,14 @@ pub enum GenState {
 }
 
 pub struct Current {
-	path: PathBuf,
+	song: Song,
 	timestamp: Timestamp,
 }
 
 impl Current {
-	pub fn new<P: Into<PathBuf>>(path: P) -> Self {
+	pub fn new(song: Song) -> Self {
 		Self {
-			path: path.into(),
+			song,
 			timestamp: Timestamp {
 				current: Duration::ZERO,
 				total: Duration::ZERO,
@@ -71,9 +75,9 @@ impl Current {
 		}
 	}
 
-	pub fn new_with_duration<P: Into<PathBuf>>(path: P, duration: Duration) -> Self {
+	pub fn new_with_duration(song: Song, duration: Duration) -> Self {
 		Self {
-			path: path.into(),
+			song,
 			timestamp: Timestamp {
 				current: Duration::ZERO,
 				total: duration,
@@ -83,7 +87,7 @@ impl Current {
 }
 
 struct GensMusic {
-	files: Vec<PathBuf>,
+	library: Library,
 
 	/// Communication from other threads
 	rx: Receiver<GenMsg>,
@@ -95,33 +99,20 @@ struct GensMusic {
 	/// Volume is in the range 0 - 100
 	volume: u8,
 
-	queue: VecDeque<PathBuf>,
+	queue: VecDeque<Song>,
 	current: Option<Current>,
 }
 
 impl GensMusic {
 	pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
 		// Gather all MP3 files in the current diretory
-		let mut mp3_files = vec![];
-		for entry in std::fs::read_dir("/Users/gen/escape room").unwrap() {
-			let entry = entry.unwrap();
-
-			match entry.path().extension() {
-				Some(ext) if ext == OsStr::new("mp3") => {
-					mp3_files.push(entry.path());
-				}
-				_ => (),
-			}
-		}
-		mp3_files.sort();
-
 		// Channel for communicating back to the GUI thread
 		let (tx, rx) = sync_channel::<GenMsg>(8); //gen- idk why 8
 
 		let sounder = Sounder::new(cc.egui_ctx.clone(), tx.clone());
 
 		Self {
-			files: mp3_files,
+			library: Library::scan("/Users/gen/Lossy".into()),
 			rx,
 
 			sounder,
@@ -166,13 +157,13 @@ impl GensMusic {
 		let next = self.queue.pop_front();
 
 		match next {
-			Some(path) => {
-				let file = File::open(&path).unwrap();
+			Some(song) => {
+				let file = File::open(&song.path).unwrap();
 				let symph = Symph::try_new(file, &Default::default()).unwrap();
 				let timestamp = symph.get_time().unwrap();
 
 				self.sounder.load(symph);
-				self.current = Some(Current { path, timestamp });
+				self.current = Some(Current { song, timestamp });
 			}
 			None => {
 				self.sounder.pause();
@@ -240,7 +231,9 @@ impl eframe::App for GensMusic {
 
 						ui.separator();
 
-						ui.label(current.path.to_string_lossy());
+						ui.label(&current.song.title);
+						ui.separator();
+						ui.label(&current.song.artist);
 					});
 				}
 			});
@@ -248,24 +241,49 @@ impl eframe::App for GensMusic {
 		egui::CentralPanel::default().show(ctx, |ui| {
 			TableBuilder::new(ui)
 				.striped(true)
+				.column(Column::auto())
+				.column(Column::remainder())
+				.column(Column::remainder())
 				.column(Column::remainder())
 				.header(20.0, |mut header| {
 					header.col(|ui| {
-						ui.heading("Path");
+						ui.heading("#");
+					});
+					header.col(|ui| {
+						ui.heading("Title");
+					});
+					header.col(|ui| {
+						ui.heading("Artist");
+					});
+					header.col(|ui| {
+						ui.heading("Album");
 					});
 				})
 				.body(|mut body| {
 					let mut should_advance = false;
 
-					for (idx, file) in self.files.iter().enumerate() {
+					for (idx, song) in self.library.songs().iter().enumerate() {
 						body.row(20.0, |mut row| {
 							row.col(|ui| {
-								if ui.label(file.to_string_lossy()).clicked() {
+								ui.label(&song.track_number.to_string());
+							});
+
+							row.col(|ui| {
+								if ui.label(&song.title).clicked() {
 									self.queue.clear();
-									self.queue
-										.extend(self.files[idx..].iter().map(<_>::to_owned));
+									self.queue.extend(
+										self.library.songs()[idx..].iter().map(<_>::to_owned),
+									);
 									should_advance = true;
 								}
+							});
+
+							row.col(|ui| {
+								ui.label(&song.artist);
+							});
+
+							row.col(|ui| {
+								ui.label(&song.album_title);
 							});
 						});
 					}
